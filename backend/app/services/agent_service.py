@@ -20,23 +20,35 @@ class AgentService:
         self.store = RunStore()
 
     def run(self, request: AgentRunRequest) -> AgentRunResponse:
-        plan = self.gemini.create_plan(request) or self._build_plan(request)
+        gemini_status = "connected" if self.gemini.is_configured else "demo fallback"
+
+        try:
+            plan = self.gemini.create_plan(request) or self._build_plan(request)
+        except Exception:
+            gemini_status = "fallback after Gemini error"
+            plan = self._build_plan(request)
+
         tool_results = self._execute_plan(plan, request)
         recommendations = self._recommend(tool_results, request.risk_tolerance)
-        summary = self.gemini.summarize(request, recommendations) or (
+        fallback_summary = (
             f"CivicOps Agent analyzed {request.city}, used the "
             f"{request.partner_track.value} track pattern, and prepared an "
             "operator-approved response plan."
         )
+        try:
+            summary = self.gemini.summarize(request, recommendations) or fallback_summary
+        except Exception:
+            gemini_status = "fallback after Gemini error"
+            summary = fallback_summary
 
         response = AgentRunResponse(
             run_id=str(uuid4()),
             integration_status=IntegrationStatus(
-                gemini="connected" if self.gemini.is_configured else "demo fallback",
+                gemini=gemini_status,
                 partner_mcp="connected" if self.tools.mcp.is_configured else "demo fallback",
                 mode=(
                     "production-ready"
-                    if self.gemini.is_configured and self.tools.mcp.is_configured
+                    if gemini_status == "connected" and self.tools.mcp.is_configured
                     else "local demo"
                 ),
             ),
@@ -50,7 +62,10 @@ class AgentService:
                 "Publish the drafted public guidance after human review.",
             ],
         )
-        self.store.save_agent_run(response.model_dump())
+        try:
+            self.store.save_agent_run(response.model_dump())
+        except Exception:
+            pass
         return response
 
     def _build_plan(self, request: AgentRunRequest) -> list[PlanStep]:
